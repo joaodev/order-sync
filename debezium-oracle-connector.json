@@ -1,0 +1,18 @@
+{
+  "name": "order-sync-oracle-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.oracle.OracleConnector",
+    "tasks.max": "1",
+    "database.hostname": "oracle-xe",
+    "database.port": "1521",
+    "database.user": "c##dbzuser",
+    "database.password": "dbz_password",
+    "database.dbname": "XE",
+    "database.pdb.name": "XEPDB1",
+    "topic.prefix": "ordersync",
+    "table.include.list": "ORDER_SYNC.LEGACY_ORDERS",
+    "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
+    "schema.history.internal.kafka.topic": "schema-changes.ordersync",
+    "log.mining.strategy": "online_catalog"
+  }
+}

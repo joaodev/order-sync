@@ -55,27 +55,131 @@ LEGACY_ORDERS (Oracle)
 
 Metrics are exposed via Spring Boot Actuator + Micrometer, scraped by Prometheus, and visualized in Grafana. The whole stack runs locally via Docker Compose, and later on Kubernetes (Minikube/Kind) for the orchestration phase.
 
-## Running Locally
+## Setting Up CDC (Debezium + Oracle)
 
-1. Copy `.env.example` to `.env` (defaults work fine for local development).
-2. Start the infrastructure:
-   ```
-   docker compose up -d
-   ```
-3. Wait for the Oracle container to report `healthy`:
-   ```
-   docker compose ps
-   ```
-4. Run the application from IntelliJ (`OrderSyncApplication`), or via Maven:
-   ```
-   ./mvnw spring-boot:run
-   ```
+By default, Oracle doesn't generate redo log data in a format Debezium can read — this requires enabling `ARCHIVELOG` mode and supplemental logging, plus a dedicated low-privilege user for the connector. This is a one-time setup per environment (already applied to the `oracle-xe` container in this project, but documented here for reproducibility).
 
-On startup, Flyway automatically applies the schema migrations against the Oracle instance running in Docker.
+### 1. Enable ARCHIVELOG mode and supplemental logging
+
+Connect to the Oracle container as `sysdba`:
+
+```bash
+docker exec -it order-sync-oracle sqlplus / as sysdba
+```
+
+Then run:
+
+```sql
+STARTUP MOUNT;
+ALTER DATABASE ARCHIVELOG;
+ALTER DATABASE OPEN;
+ALTER DATABASE ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS;
+```
+
+Verify:
+
+```sql
+ARCHIVE LOG LIST;
+-- Database log mode should be "Archive Mode"
+
+SELECT supplemental_log_data_min, supplemental_log_data_all FROM v$database;
+-- Both columns should show YES (or IMPLICIT / YES)
+```
+
+### 2. Create a dedicated Debezium user
+
+Still connected as `sysdba`:
+
+```sql
+CREATE USER c##dbzuser IDENTIFIED BY dbz_password
+  DEFAULT TABLESPACE USERS
+  QUOTA UNLIMITED ON USERS
+  CONTAINER=ALL;
+
+GRANT CREATE SESSION TO c##dbzuser CONTAINER=ALL;
+GRANT SET CONTAINER TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$DATABASE TO c##dbzuser CONTAINER=ALL;
+GRANT FLASHBACK ANY TABLE TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ANY TABLE TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT_CATALOG_ROLE TO c##dbzuser CONTAINER=ALL;
+GRANT EXECUTE_CATALOG_ROLE TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ANY TRANSACTION TO c##dbzuser CONTAINER=ALL;
+GRANT LOGMINING TO c##dbzuser CONTAINER=ALL;
+
+GRANT CREATE TABLE TO c##dbzuser CONTAINER=ALL;
+GRANT LOCK ANY TABLE TO c##dbzuser CONTAINER=ALL;
+GRANT CREATE SEQUENCE TO c##dbzuser CONTAINER=ALL;
+
+GRANT EXECUTE ON DBMS_LOGMNR TO c##dbzuser CONTAINER=ALL;
+GRANT EXECUTE ON DBMS_LOGMNR_D TO c##dbzuser CONTAINER=ALL;
+
+GRANT SELECT ON V_$LOGMNR_LOGS TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$LOGMNR_CONTENTS TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$LOG TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$LOG_HISTORY TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$LOGFILE TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$ARCHIVED_LOG TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$ARCHIVE_DEST_STATUS TO c##dbzuser CONTAINER=ALL;
+GRANT SELECT ON V_$TRANSACTION TO c##dbzuser CONTAINER=ALL;
+```
+
+> **Why `c##` prefix?** Oracle's multitenant architecture (CDB + PDB) requires common users — ones that need to exist across all pluggable databases — to be prefixed with `c##`. This is an Oracle naming convention, not a project choice.
+
+### 3. Register the Debezium connector
+
+With `kafka-connect` running (`docker compose up -d kafka-connect`), register the connector using the config in `debezium-oracle-connector.json`:
+
+```bash
+curl -i -X POST http://localhost:8083/connectors \
+  -H "Content-Type: application/json" \
+  -d @debezium-oracle-connector.json
+```
+
+Check its status:
+
+```bash
+curl http://localhost:8083/connectors/order-sync-oracle-connector/status
+```
+
+Both `connector.state` and the task's `state` should show `RUNNING`.
+
+### 4. Verify CDC is working
+
+Insert a row directly into the legacy table:
+
+```bash
+docker exec -it order-sync-oracle sqlplus order_sync/order_sync_pw@localhost:1521/XEPDB1
+```
+
+```sql
+INSERT INTO legacy_orders (customer_name, product_code, quantity, unit_price, status)
+VALUES ('CDC Test Customer', 'SKU-CDC', 2, 33.50, 'PENDING');
+COMMIT;
+```
+
+In another terminal, consume the CDC topic:
+
+```bash
+docker exec -it order-sync-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic ordersync.ORDER_SYNC.LEGACY_ORDERS \
+  --from-beginning
+```
+
+A JSON event representing the insert should appear, without any manual API call.
 
 ## Testing the API
 
 The base URL for local development is `http://localhost:8080`.
+
+### Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/orders` | List all synced orders |
+| `POST` | `/api/orders` | Create a new order |
+| `PUT` | `/api/orders/{legacyOrderId}` | Update an existing order |
+| `GET` | `/actuator/health` | Application health check (Spring Boot Actuator) |
 
 ### Create an order
 
