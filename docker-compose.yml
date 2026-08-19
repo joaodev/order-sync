@@ -35,6 +35,21 @@ services:
     volumes:
       - kafka-data:/var/lib/kafka/data
 
+  kafka-connect:
+    image: debezium/connect:3.0.0.Final
+    container_name: order-sync-kafka-connect
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: order-sync-connect
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+    depends_on:
+      - kafka
+      - oracle-xe
+
   redis:
     image: redis:7-alpine
     container_name: order-sync-redis
