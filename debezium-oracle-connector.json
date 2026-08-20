@@ -11,7 +11,7 @@
     "database.pdb.name": "XEPDB1",
     "topic.prefix": "ordersync",
     "table.include.list": "ORDER_SYNC.LEGACY_ORDERS",
-    "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
+    "schema.history.internal.kafka.bootstrap.servers": "kafka:19092",
     "schema.history.internal.kafka.topic": "schema-changes.ordersync",
     "log.mining.strategy": "online_catalog"
   }
