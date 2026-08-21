@@ -92,9 +92,9 @@ Still connected as `sysdba`:
 
 ```sql
 CREATE USER c##dbzuser IDENTIFIED BY dbz_password
-    DEFAULT TABLESPACE USERS
-    QUOTA UNLIMITED ON USERS
-    CONTAINER=ALL;
+   DEFAULT TABLESPACE USERS
+   QUOTA UNLIMITED ON USERS
+   CONTAINER=ALL;
 
 GRANT CREATE SESSION TO c##dbzuser CONTAINER=ALL;
 GRANT SET CONTAINER TO c##dbzuser CONTAINER=ALL;
@@ -228,9 +228,70 @@ legacyOrderId,customerName,productCode,quantity,unitPrice,status
 - **Nothing happens after dropping the file** — check the file actually has a `.csv` extension; other file types are ignored. Also confirm the app log shows `File system watcher started, monitoring: .../import/incoming` at startup.
 - **File lands in `error/`** — check the application logs for the exception; the most common cause is a malformed row (wrong column count, non-numeric quantity/price, or empty required fields).
 
+## Setting Up Keycloak
+
+All REST endpoints require a valid JWT. This is a one-time setup per environment (already applied to the `keycloak` container in this project, but documented here for reproducibility).
+
+### 1. Create the realm
+
+1. Open `http://localhost:8081` and log in (`admin` / `admin`, or whatever you set in `.env`).
+2. Click the realm dropdown (top left, shows `master`) → **Create Realm**.
+3. Name: `order-sync`. Click **Create**.
+
+### 2. Create the client
+
+1. Inside the `order-sync` realm, go to **Clients** → **Create client**.
+2. Client ID: `order-sync-api`. Click **Next**.
+3. **Capability config**: turn **Client authentication** to `On` (this makes it a confidential client, with a secret). Under **Authentication flow**, check **Standard flow**, **Direct access grants**, and **Service accounts roles**. Click **Next**.
+4. **Login settings**: leave everything blank (these fields are only relevant for browser-redirect login flows, which this project doesn't use). Click **Save**.
+
+### 3. Get the client secret
+
+1. On the client's page, go to the **Credentials** tab.
+2. Copy the **Client secret** value.
+
+### 4. Create a test user
+
+1. Go to **Users** → **Add user**. Username: `testuser`. Click **Create**.
+2. On the user's **Credentials** tab, click **Set password**. Set a password (e.g. `testpassword`), turn **Temporary** off, and save.
+
+### 5. Configure the application
+
+Add the following to your `.env` (see `.env.example` for the full list):
+
+```
+KEYCLOAK_CLIENT_SECRET=<the client secret you copied>
+KEYCLOAK_TEST_USERNAME=testuser
+KEYCLOAK_TEST_PASSWORD=testpassword
+```
+
+The application reads `.env` automatically at startup (via `spring-dotenv`) — no manual environment variable setup needed in your IDE or shell.
+
 ## Testing the API
 
-The base URL for local development is `http://localhost:8080`.
+The base URL for local development is `http://localhost:8080`. All endpoints below (except `/actuator/health`) require a valid JWT — see [Setting Up Keycloak](#setting-up-keycloak) first.
+
+### Getting an access token
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8081/realms/order-sync/protocol/openid-connect/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=password" \
+  -d "client_id=order-sync-api" \
+  -d "client_secret=$KEYCLOAK_CLIENT_SECRET" \
+  -d "username=testuser" \
+  -d "password=testpassword" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+```
+
+This uses the `password` grant with the test user — the simplest way to get a token by hand. Machine-to-machine callers (like the automated tests) instead use the `client_credentials` grant, which doesn't require a username/password.
+
+Include the token in every request:
+
+```bash
+curl http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN"
+```
+
+A request without a valid token, or with an expired one, returns `401 Unauthorized`.
 
 ### Endpoints
 
@@ -262,6 +323,7 @@ Example with `curl`:
 ```bash
 curl -i -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{
         "legacyOrderId": 3001,
         "customerName": "Acme Corp",
@@ -294,6 +356,7 @@ Example with `curl`:
 ```bash
 curl -i -X PUT http://localhost:8080/api/orders/3001 \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{
         "customerName": "Acme Corp",
         "productCode": "SKU-001",
@@ -308,7 +371,7 @@ Returns `200 OK` with the updated order. If any field actually changed, `current
 ### List all orders
 
 ```bash
-curl http://localhost:8080/api/orders
+curl http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN"
 ```
 
 Returns `200 OK` with a JSON array of all orders currently synced.
@@ -317,6 +380,7 @@ Returns `200 OK` with a JSON array of all orders currently synced.
 
 | Scenario | Status | Notes |
 |---|---|---|
+| Missing or invalid JWT | `401 Unauthorized` | |
 | Creating an order with a `legacyOrderId` that already exists | `409 Conflict` | |
 | Updating a `legacyOrderId` that doesn't exist | `404 Not Found` | |
 | Invalid payload (missing/blank fields, negative quantity or price) | `400 Bad Request` | Response body includes a `fields` map with the specific validation errors |

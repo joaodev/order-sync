@@ -4,6 +4,11 @@ spring:
   batch:
     job:
       enabled: false
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: http://localhost:8081/realms/order-sync
 
   datasource:
     url: jdbc:oracle:thin:@localhost:1521/XEPDB1
@@ -38,3 +43,10 @@ app:
     incoming-dir: ./import/incoming
     processed-dir: ./import/processed
     error-dir: ./import/error
+  security:
+    keycloak:
+      token-uri: http://localhost:8081/realms/order-sync/protocol/openid-connect/token
+      client-id: order-sync-api
+      client-secret: ${KEYCLOAK_CLIENT_SECRET:}
+      test-username: ${KEYCLOAK_TEST_USERNAME:}
+      test-password: ${KEYCLOAK_TEST_PASSWORD:}
