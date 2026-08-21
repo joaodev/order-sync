@@ -34,7 +34,7 @@ public class OrderHistoryRepository {
                 .where(orderIdField.eq(orderId))
                 .fetch()
                 .forEach(r -> entries.add(
-                        new HistoryEntry("SNAPSHOT", "version" + r.value1(), r.value2())));
+                        new HistoryEntry("SNAPSHOT", "version " + r.value1(), r.value2())));
 
         dsl.select(
                     field(name("from_version"), Integer.class),
