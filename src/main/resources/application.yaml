@@ -1,13 +1,15 @@
 spring:
   application:
     name: order-sync
+  batch:
+    job:
+      enabled: false
 
   datasource:
     url: jdbc:oracle:thin:@localhost:1521/XEPDB1
     username: ${DB_USER:order_sync}
     password: ${DB_PASSWORD:order_sync_pw}
     driver-class-name: oracle.jdbc.OracleDriver
-
   jpa:
     open-in-view: false
     hibernate:
@@ -16,11 +18,9 @@ spring:
     properties:
       hibernate:
         format_sql: true
-
   flyway:
     enabled: true
     locations: classpath:db/migration
-
   kafka:
     bootstrap-servers: localhost:9092
     consumer:
@@ -28,8 +28,13 @@ spring:
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
-
   data:
     redis:
       host: localhost
       port: 6379
+
+app:
+  file-watcher:
+    incoming-dir: ./import/incoming
+    processed-dir: ./import/processed
+    error-dir: ./import/error

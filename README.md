@@ -92,9 +92,9 @@ Still connected as `sysdba`:
 
 ```sql
 CREATE USER c##dbzuser IDENTIFIED BY dbz_password
-  DEFAULT TABLESPACE USERS
-  QUOTA UNLIMITED ON USERS
-  CONTAINER=ALL;
+    DEFAULT TABLESPACE USERS
+    QUOTA UNLIMITED ON USERS
+    CONTAINER=ALL;
 
 GRANT CREATE SESSION TO c##dbzuser CONTAINER=ALL;
 GRANT SET CONTAINER TO c##dbzuser CONTAINER=ALL;
@@ -167,6 +167,66 @@ docker exec -it order-sync-kafka /opt/kafka/bin/kafka-console-consumer.sh \
 ```
 
 A JSON event representing the insert should appear, without any manual API call.
+
+## Testing the File Import (Spring Batch + File System Watcher)
+
+Branches without CDC access send order data as CSV files instead. The application watches a folder for new `.csv` files and imports them automatically through the same `OrderVersioningService` used by the REST API and the CDC pipeline — no manual trigger needed.
+
+### How it works
+
+1. A `FileSystemWatcherService` monitors `./import/incoming` using Java's native `WatchService`.
+2. When a `.csv` file appears, it waits until the file finishes being written (checks that its size has stopped changing), then launches a Spring Batch job.
+3. The job reads the file in chunks of 5 rows, validates each row, and creates or updates orders exactly like the REST API and CDC consumer do.
+4. On success, the file is moved to `./import/processed`. On failure, it's moved to `./import/error` for inspection.
+
+### Directory structure
+
+These folders are created automatically on startup if they don't exist:
+
+```
+import/
+  incoming/   <- drop new CSV files here
+  processed/  <- successfully imported files land here
+  error/      <- failed files land here
+```
+
+### CSV format
+
+Header row required, columns in this exact order:
+
+```
+legacyOrderId,customerName,productCode,quantity,unitPrice,status
+```
+
+Example (`sample-orders.csv`, included in the project root):
+
+```csv
+legacyOrderId,customerName,productCode,quantity,unitPrice,status
+5001,Batch Test Corp,SKU-BATCH,3,45.00,PENDING
+5002,File Import Ltd,SKU-FILE,7,12.50,CONFIRMED
+5003,Warehouse Direct,SKU-WHS,1,299.99,PENDING
+```
+
+### Try it
+
+1. Make sure the application is running (`OrderSyncApplication`).
+2. Copy `sample-orders.csv` into `./import/incoming/`:
+   ```bash
+   cp sample-orders.csv import/incoming/
+   ```
+3. Watch the application logs — within a second or two you should see the batch job start, followed by `Hibernate: insert into orders...` for each new row.
+4. Confirm the file moved to `./import/processed/`.
+5. Confirm the orders were imported:
+   ```bash
+   curl http://localhost:8080/api/orders
+   ```
+   Orders `5001`, `5002`, and `5003` should appear, each with `currentVersion: 1` and a corresponding snapshot and audit trail entry (`source: FILE_WATCHER`).
+6. Drop the same file again (or a modified copy with the same `legacyOrderId`s) to see the update path: existing orders get a new snapshot, delta, and `currentVersion` increments.
+
+### Troubleshooting
+
+- **Nothing happens after dropping the file** — check the file actually has a `.csv` extension; other file types are ignored. Also confirm the app log shows `File system watcher started, monitoring: .../import/incoming` at startup.
+- **File lands in `error/`** — check the application logs for the exception; the most common cause is a malformed row (wrong column count, non-numeric quantity/price, or empty required fields).
 
 ## Testing the API
 
