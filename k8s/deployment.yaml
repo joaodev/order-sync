@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-sync
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order-sync
+  template:
+    metadata:
+      labels:
+        app: order-sync
+    spec:
+      containers:
+        - name: order-sync
+          image: order-sync-app:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: order-sync-config
+            - secretRef:
+                name: order-sync-secrets
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 20

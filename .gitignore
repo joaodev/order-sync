@@ -36,3 +36,5 @@ build/
 .env
 /import/processed/
 /import/error/
+
+/k8s/secret.yaml

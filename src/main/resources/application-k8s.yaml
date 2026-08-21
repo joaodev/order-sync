@@ -1,0 +1,13 @@
+spring:
+  datasource:
+    url: jdbc:oracle:thin:@host.minikube.internal:1521/XEPDB1
+  kafka:
+    bootstrap-servers: host.minikube.internal:9094
+  data:
+    redis:
+      host: host.minikube.internal
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: http://host.minikube.internal:8081/realms/order-sync/protocol/openid-connect/certs

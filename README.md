@@ -454,6 +454,110 @@ Returns `200 OK` with a JSON array of all orders currently synced.
 | Updating a `legacyOrderId` that doesn't exist | `404 Not Found` | |
 | Invalid payload (missing/blank fields, negative quantity or price) | `400 Bad Request` | Response body includes a `fields` map with the specific validation errors |
 
+## Deploying to Kubernetes
+
+The application can also run inside a local Kubernetes cluster (Minikube), while the infrastructure (Oracle, Kafka, Redis, Keycloak) keeps running via Docker Compose, outside the cluster. This mirrors a common real-world pattern: a new service moving to Kubernetes while integrating with systems that stay where they are.
+
+### Prerequisites
+
+Install `kubectl` and Minikube:
+
+```bash
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+chmod +x kubectl
+sudo mv kubectl /usr/local/bin/
+
+curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+sudo install minikube-linux-amd64 /usr/local/bin/minikube
+```
+
+Start the cluster:
+
+```bash
+minikube start --driver=docker
+kubectl get nodes   # should show "minikube" with status Ready
+```
+
+### How networking works here
+
+The app's pod runs inside the Minikube cluster, but Oracle, Kafka, Redis, and Keycloak run outside it, via the existing `docker-compose.yml`. Minikube (with the `docker` driver) resolves the special hostname `host.minikube.internal` back to your host machine, so the `k8s` Spring profile (`application-k8s.yaml`) uses that instead of `localhost` or Docker Compose service names:
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:oracle:thin:@host.minikube.internal:1521/XEPDB1
+  kafka:
+    bootstrap-servers: host.minikube.internal:9094
+  data:
+    redis:
+      host: host.minikube.internal
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: http://host.minikube.internal:8081/realms/order-sync/protocol/openid-connect/certs
+```
+
+**Kafka needs a third listener for this.** The broker advertises different addresses depending on who's connecting: `kafka:19092` inside the Docker Compose network, `localhost:9092` for the host machine, and — new for this phase — `host.minikube.internal:9094` for anything running inside Minikube. All three are configured on the `kafka` service in `docker-compose.yml`:
+
+```yaml
+KAFKA_LISTENERS: PLAINTEXT://:19092,PLAINTEXT_HOST://:9092,PLAINTEXT_K8S://:9094,CONTROLLER://:9093
+KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:19092,PLAINTEXT_HOST://localhost:9092,PLAINTEXT_K8S://host.minikube.internal:9094
+```
+
+Without this, the pod can make the *initial* connection to Kafka but then gets redirected to `localhost:9092` for the actual group coordinator — which, from inside the pod, means the pod itself, not the broker. That failure mode looks like `Connection to node ... (localhost/127.0.0.1:9092) could not be established` in the logs, repeated forever.
+
+### Build the image inside Minikube
+
+Minikube runs its own isolated Docker daemon — the image built for `docker-compose.yml` isn't visible to it. Point your terminal at Minikube's Docker before building:
+
+```bash
+eval $(minikube docker-env)
+docker build -t order-sync-app:latest .
+docker images | grep order-sync-app   # confirm it exists
+```
+
+This `eval` only affects the current terminal session. Undo it with `eval $(minikube docker-env -u)` when you want to go back to your normal Docker (for example, to run `docker compose` commands against the host infrastructure).
+
+### Kubernetes manifests
+
+The `k8s/` folder contains:
+
+- `configmap.yaml` — non-sensitive configuration (active profile, DB username).
+- `secret.yaml` — sensitive values (DB password, Keycloak client secret). **Not committed to git** — copy `secret.example.yaml` and fill in real values.
+- `deployment.yaml` — the app's Deployment, with `imagePullPolicy: Never` (the image is only ever built locally into Minikube, never pulled from a registry), and readiness/liveness probes against Spring Boot Actuator's `/actuator/health/readiness` and `/actuator/health/liveness` endpoints.
+- `service.yaml` — a `NodePort` Service exposing the app on port `30080`.
+
+Apply them:
+
+```bash
+kubectl apply -f k8s/configmap.yaml -f k8s/secret.yaml -f k8s/deployment.yaml -f k8s/service.yaml
+kubectl get pods -w
+```
+
+Wait for the pod to reach `1/1 Running` with `0` restarts.
+
+### Testing the deployment
+
+```bash
+MINIKUBE_IP=$(minikube ip)
+curl http://$MINIKUBE_IP:30080/actuator/health
+```
+
+With a token (see [Getting an access token](#getting-an-access-token)):
+
+```bash
+curl http://$MINIKUBE_IP:30080/api/orders -H "Authorization: Bearer $TOKEN"
+```
+
+### Troubleshooting
+
+- **Pod crashes with `AccessDeniedException` on `/app/import`** — the container's non-root user doesn't own `/app`. Fix: in the `Dockerfile`, run `chown -R spring:spring /app` after copying the jar, before switching to the `spring` user.
+- **Consumer stuck reconnecting to `localhost:9092` forever** — missing third Kafka listener. See the networking section above; add `PLAINTEXT_K8S` and recreate the `kafka` container.
+- **A newly added container port shows as mapped (`docker port`) but connections are refused on the host** — the `docker-proxy` process handling that port binding can get stuck, especially after adding a port to an already-running container. `docker compose stop && docker compose rm -f && docker compose up -d` on the affected service usually fixes it; if not, `sudo systemctl restart docker` clears it (this restarts all containers, including Minikube, which you'll need to `minikube start` again afterwards).
+- **Readiness/liveness probes fail with `401`** — Spring Security is blocking Kubernetes' own health checks. The `SecurityConfig` needs to permit `/actuator/health/**` (not just the exact `/actuator/health` path), since the probes hit `/actuator/health/readiness` and `/actuator/health/liveness` specifically.
+- **After `minikube start`, the built image seems to have disappeared** — if Minikube's underlying container was fully removed (not just restarted), rebuild it with `eval $(minikube docker-env) && docker build -t order-sync-app:latest .`, then `kubectl rollout restart deployment/order-sync`.
+
 ## Running Tests
 
 - `./mvnw test` — fast unit/context tests only, no Docker required.
