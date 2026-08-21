@@ -1,0 +1,13 @@
+spring:
+  datasource:
+    url: jdbc:oracle:thin:@oracle-xe:1521/XEPDB1
+  kafka:
+    bootstrap-servers: kafka:19092
+  data:
+    redis:
+      host: redis
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: http://keycloak:8080/realms/order-sync/protocol/openid-connect/certs

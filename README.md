@@ -55,6 +55,75 @@ LEGACY_ORDERS (Oracle)
 
 Metrics are exposed via Spring Boot Actuator + Micrometer, scraped by Prometheus, and visualized in Grafana. The whole stack runs locally via Docker Compose, and later on Kubernetes (Minikube/Kind) for the orchestration phase.
 
+## Running Locally
+
+There are two ways to run the application: from your IDE/Maven (useful while developing), or fully containerized (closer to how it would run in a real deployment).
+
+### Option A: Application on host, infrastructure in Docker
+
+1. Copy `.env.example` to `.env` (defaults work fine for local development).
+2. Start the infrastructure:
+   ```
+   docker compose up -d
+   ```
+3. Wait for the Oracle container to report `healthy`:
+   ```
+   docker compose ps
+   ```
+4. Run the application from IntelliJ (`OrderSyncApplication`), or via Maven:
+   ```
+   ./mvnw spring-boot:run
+   ```
+
+The `.env` file is loaded automatically by the application at startup (via `spring-dotenv`) — no manual environment variable setup needed in your IDE or shell.
+
+On startup, Flyway automatically applies the schema migrations against the Oracle instance running in Docker.
+
+### Option B: Everything in Docker, including the application
+
+The application itself can also run as a container, using the `docker` Spring profile (`application-docker.yaml`), which points at the other services by their Docker Compose service names (`oracle-xe`, `kafka`, `redis`, `keycloak`) instead of `localhost`.
+
+1. Copy `.env.example` to `.env` and fill in the real values (the `app` container reads these as environment variables, not via `spring-dotenv`, since `spring-dotenv` is a development-only dependency not included in the container image).
+2. Build and start everything, including the application:
+   ```
+   docker compose up -d --build
+   ```
+   Or, to (re)build and start only the application service after infrastructure is already running:
+   ```
+   docker compose build app
+   docker compose up -d app
+   ```
+3. Check it started correctly:
+   ```
+   docker compose logs app
+   ```
+   Look for `Started OrderSyncApplication`, a Flyway line confirming migrations were applied against `oracle-xe`, and no connection errors for Kafka, Redis, or Keycloak.
+4. Verify it's reachable from the host:
+   ```
+   curl http://localhost:8080/actuator/health
+   ```
+
+The container build uses a multi-stage `Dockerfile`: the app is compiled inside a `jdk` image, then copied into a much smaller `jre`-only runtime image, running as a non-root user.
+
+**File imports while containerized:** the `./import` folder is bind-mounted into the container, so dropping a CSV into `./import/incoming` on your host still triggers the file watcher exactly as described in [Testing the File Import](#testing-the-file-import-spring-batch--file-system-watcher).
+
+**Getting a token from inside the container** (useful for debugging network issues without leaving the Docker network):
+
+```bash
+docker compose exec app sh -c '
+TOKEN=$(curl -s -X POST http://keycloak:8080/realms/order-sync/protocol/openid-connect/token \
+  -d "grant_type=password" \
+  -d "client_id=order-sync-api" \
+  -d "client_secret=$KEYCLOAK_CLIENT_SECRET" \
+  -d "username=testuser" \
+  -d "password=testpassword" | sed -n "s/.*\"access_token\":\"\([^\"]*\)\".*/\1/p")
+
+curl -i http://localhost:8080/api/orders -H "Authorization: Bearer $TOKEN"
+'
+```
+
+Note the container uses `keycloak:8080` (the internal Docker network address and port), not `localhost:8081` (the host-mapped port used everywhere else in this README).
+
 ## Setting Up CDC (Debezium + Oracle)
 
 By default, Oracle doesn't generate redo log data in a format Debezium can read — this requires enabling `ARCHIVELOG` mode and supplemental logging, plus a dedicated low-privilege user for the connector. This is a one-time setup per environment (already applied to the `oracle-xe` container in this project, but documented here for reproducibility).
