@@ -484,18 +484,18 @@ The app's pod runs inside the Minikube cluster, but Oracle, Kafka, Redis, and Ke
 
 ```yaml
 spring:
-  datasource:
-    url: jdbc:oracle:thin:@host.minikube.internal:1521/XEPDB1
-  kafka:
-    bootstrap-servers: host.minikube.internal:9094
-  data:
-    redis:
-      host: host.minikube.internal
-  security:
-    oauth2:
-      resourceserver:
-        jwt:
-          jwk-set-uri: http://host.minikube.internal:8081/realms/order-sync/protocol/openid-connect/certs
+   datasource:
+      url: jdbc:oracle:thin:@host.minikube.internal:1521/XEPDB1
+   kafka:
+      bootstrap-servers: host.minikube.internal:9094
+   data:
+      redis:
+         host: host.minikube.internal
+   security:
+      oauth2:
+         resourceserver:
+            jwt:
+               jwk-set-uri: http://host.minikube.internal:8081/realms/order-sync/protocol/openid-connect/certs
 ```
 
 **Kafka needs a third listener for this.** The broker advertises different addresses depending on who's connecting: `kafka:19092` inside the Docker Compose network, `localhost:9092` for the host machine, and — new for this phase — `host.minikube.internal:9094` for anything running inside Minikube. All three are configured on the `kafka` service in `docker-compose.yml`:
@@ -557,6 +557,56 @@ curl http://$MINIKUBE_IP:30080/api/orders -H "Authorization: Bearer $TOKEN"
 - **A newly added container port shows as mapped (`docker port`) but connections are refused on the host** — the `docker-proxy` process handling that port binding can get stuck, especially after adding a port to an already-running container. `docker compose stop && docker compose rm -f && docker compose up -d` on the affected service usually fixes it; if not, `sudo systemctl restart docker` clears it (this restarts all containers, including Minikube, which you'll need to `minikube start` again afterwards).
 - **Readiness/liveness probes fail with `401`** — Spring Security is blocking Kubernetes' own health checks. The `SecurityConfig` needs to permit `/actuator/health/**` (not just the exact `/actuator/health` path), since the probes hit `/actuator/health/readiness` and `/actuator/health/liveness` specifically.
 - **After `minikube start`, the built image seems to have disappeared** — if Minikube's underlying container was fully removed (not just restarted), rebuild it with `eval $(minikube docker-env) && docker build -t order-sync-app:latest .`, then `kubectl rollout restart deployment/order-sync`.
+
+## Advanced Queries with jOOQ
+
+Two read-only reporting endpoints are built with jOOQ instead of Spring Data JPA, for queries that go beyond simple CRUD: a chronological history combining data from three different tables, and an aggregated report with `GROUP BY` and `SUM`.
+
+### About the jOOQ edition used here
+
+jOOQ has a free **Open Source Edition** and a paid **Professional/Enterprise Edition**. Oracle-specific SQL dialect support (`SQLDialect.ORACLE`) is a commercial-only feature — the open source jar doesn't include it. This project uses:
+
+- `SQLDialect.DEFAULT` (the ANSI-SQL generic dialect) instead of `SQLDialect.ORACLE`, configured via `spring.jooq.sql-dialect: DEFAULT` in `application.yaml`. This avoids Spring Boot auto-detecting `ORACLE` from the JDBC URL, which would fail at startup since that dialect class isn't present in the open source jar.
+- Plain `DSL.table(DSL.name(...))` / `DSL.field(DSL.name(...))` references instead of generated classes (no `jooq-codegen`), since the code generator's Oracle support has the same open-source limitation.
+- `Settings().withRenderQuotedNames(RenderQuotedNames.NEVER)` — without this, jOOQ quotes identifiers (`"order_snapshots"`), which Oracle then treats as case-sensitive and fails to find, since Flyway created the tables unquoted (stored internally as `ORDER_SNAPSHOTS`, uppercase). Disabling quoting lets Oracle uppercase identifiers automatically, matching what Hibernate already does by default.
+
+In a real (non-portfolio) setting with a jOOQ Professional license, `SQLDialect.ORACLE` plus generated typed classes would replace this approach, with no changes to the surrounding application code.
+
+### Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/orders/{legacyOrderId}/history` | Chronological timeline of an order: snapshots, deltas, and audit trail entries, merged and sorted by timestamp |
+| `GET` | `/api/reports/orders-summary` | Order count and total value (`quantity × unitPrice`), grouped by status |
+
+Both require a valid JWT, same as the rest of the API (see [Getting an access token](#getting-an-access-token)).
+
+### Try it
+
+```bash
+curl http://localhost:8080/api/orders/1/history -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+[
+  {"eventType":"SNAPSHOT","detail":"version 1","occurredAt":"2026-08-20T14:43:27.632723"},
+  {"eventType":"CREATED","detail":"via CDC","occurredAt":"2026-08-20T14:43:27.634962"}
+]
+```
+
+```bash
+curl http://localhost:8080/api/reports/orders-summary -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+[
+  {"status":"CONFIRMED","orderCount":2,"totalValue":684.5},
+  {"status":"PENDING","orderCount":4,"totalValue":1000.99},
+  {"status":"SHIPPED","orderCount":1,"totalValue":359.6}
+]
+```
+
+The `{legacyOrderId}` in the history endpoint refers to the order's ID in the legacy system (the same one used everywhere else in the API), not the internal `orders.id` primary key — the endpoint resolves that translation internally.
 
 ## Running Tests
 

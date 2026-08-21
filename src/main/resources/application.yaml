@@ -9,6 +9,8 @@ spring:
       resourceserver:
         jwt:
           jwk-set-uri: http://localhost:8081/realms/order-sync/protocol/openid-connect/certs
+  jooq:
+    sql-dialect: DEFAULT
 
   datasource:
     url: jdbc:oracle:thin:@localhost:1521/XEPDB1
