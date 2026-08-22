@@ -1,0 +1,124 @@
+{
+  "name": "Order Sync - Daily Reconciliation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Every day at 6am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://app:8080/api/orders",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "id": "fetch-orders",
+      "name": "Fetch All Orders",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "order-sync-oauth2",
+          "name": "Order Sync Keycloak (Client Credentials)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsToExecute": "runOnceForAllItems",
+        "jsCode": "const now = new Date();\nconst STALE_HOURS = 24;\n\nconst stalePending = items.filter((item) => {\n  const order = item.json;\n  if (order.status !== 'PENDING') return false;\n\n  const syncedAt = new Date(order.syncedAt);\n  const hoursSinceSync = (now - syncedAt) / (1000 * 60 * 60);\n  return hoursSinceSync > STALE_HOURS;\n});\n\nreturn stalePending.map((item) => ({ json: item.json }));"
+      },
+      "id": "filter-stale-orders",
+      "name": "Filter Stale PENDING Orders",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-stale-orders",
+              "leftValue": "={{ $items().length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "check-if-any-stale",
+      "name": "Any Stale Orders?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "alert-message",
+              "name": "alertMessage",
+              "type": "string",
+              "value": "={{ 'Reconciliation alert: ' + $items().length + ' order(s) stuck in PENDING for over 24 hours. Legacy Order IDs: ' + $items().map(i => i.json.legacyOrderId).join(', ') }}"
+            }
+          ]
+        }
+      },
+      "id": "build-alert",
+      "name": "Build Alert Message",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1120, 200]
+    },
+    {
+      "parameters": {},
+      "id": "no-stale-orders",
+      "name": "No Stale Orders Found",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1120, 400]
+    }
+  ],
+  "connections": {
+    "Every day at 6am": {
+      "main": [[{ "node": "Fetch All Orders", "type": "main", "index": 0 }]]
+    },
+    "Fetch All Orders": {
+      "main": [[{ "node": "Filter Stale PENDING Orders", "type": "main", "index": 0 }]]
+    },
+    "Filter Stale PENDING Orders": {
+      "main": [[{ "node": "Any Stale Orders?", "type": "main", "index": 0 }]]
+    },
+    "Any Stale Orders?": {
+      "main": [
+        [{ "node": "Build Alert Message", "type": "main", "index": 0 }],
+        [{ "node": "No Stale Orders Found", "type": "main", "index": 0 }]
+      ]
+    }
+  }
+}

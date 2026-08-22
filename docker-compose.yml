@@ -99,6 +99,8 @@ services:
       N8N_BASIC_AUTH_ACTIVE: "true"
       N8N_BASIC_AUTH_USER: ${N8N_USER:-admin}
       N8N_BASIC_AUTH_PASSWORD: ${N8N_PASSWORD:-admin}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - n8n-data:/home/node/.n8n
 

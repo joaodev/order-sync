@@ -608,6 +608,58 @@ curl http://localhost:8080/api/reports/orders-summary -H "Authorization: Bearer 
 
 The `{legacyOrderId}` in the history endpoint refers to the order's ID in the legacy system (the same one used everywhere else in the API), not the internal `orders.id` primary key — the endpoint resolves that translation internally.
 
+## Automating with n8n
+
+A scheduled n8n workflow calls the REST API daily to detect orders stuck in `PENDING` status for more than 24 hours — a lightweight reconciliation check, orchestrated entirely outside the application code. The workflow definition lives in `n8n/order-reconciliation-workflow.json`.
+
+### How it works
+
+1. **Schedule Trigger** — fires once a day at 6am.
+2. **Fetch All Orders** — `GET /api/orders`, authenticated via n8n's built-in OAuth2 credential (client credentials grant against Keycloak).
+3. **Filter Stale PENDING Orders** — a Code node keeps only orders with `status: PENDING` where `syncedAt` is older than 24 hours.
+4. **Any Stale Orders?** — branches based on whether any were found.
+5. **Build Alert Message** — formats a summary listing the affected `legacyOrderId`s.
+
+No email/Slack integration is wired up in this project — the "alert" step just produces a formatted message in the workflow output. In a real deployment, the final node would be swapped for n8n's Slack or Email node; the detection logic stays the same.
+
+### Prerequisites
+
+The workflow calls the application and Keycloak by their Docker Compose service names (`app`, `keycloak`), since n8n itself runs as a container on the same Compose network. This means:
+
+- The application must be running as the `app` container (`docker compose up -d app`) — running it from IntelliJ instead won't work for this workflow, since `app` as a hostname only resolves inside the Docker network.
+- All the usual infrastructure (`keycloak`, `oracle-xe`) needs to be up too.
+
+### Setup
+
+1. **Create the OAuth2 credential in n8n.**
+
+   Open `http://localhost:5678` (`admin` / `admin`, or your `.env` values) → **Credentials** → **Add Credential** → **OAuth2 API**.
+
+   | Field | Value |
+      |---|---|
+   | Grant Type | Client Credentials |
+   | Access Token URL | `http://keycloak:8080/realms/order-sync/protocol/openid-connect/token` |
+   | Client ID | `order-sync-api` |
+   | Client Secret | your `KEYCLOAK_CLIENT_SECRET` value |
+   | Scope | *(leave blank)* |
+
+   Name it **`Order Sync Keycloak (Client Credentials)`** — the imported workflow expects a credential with this name. Save; n8n validates it immediately by requesting a token.
+
+2. **Import the workflow.**
+
+   **Workflows** → **Add workflow** (opens a blank canvas) → **⋯** (top right) → **Import from File** → select `n8n/order-reconciliation-workflow.json`.
+
+3. **Link the credential**, if it wasn't picked up automatically: click the **Fetch All Orders** node → under **OAuth2 API**, select the credential created in step 1.
+
+### Try it
+
+With the `app` container running, open the **Fetch All Orders** node and click **Execute step** — this runs just that node, without waiting for the daily schedule. You should see the real list of orders in the output panel. Then use **Execute workflow** (top left) to run the whole chain and see whether it lands on **Build Alert Message** or **No Stale Orders Found**, depending on your current data.
+
+### Troubleshooting
+
+- **Connection to Keycloak/API times out from within n8n** — don't use `host.docker.internal` or a Docker gateway IP (like `172.17.0.1`) here. Both Keycloak and the app are services on the *same* Compose network as n8n, so they're reachable directly by service name (`keycloak`, `app`) and their *internal* ports (`8080` for both, not the host-mapped `8081`/`8080`). `host.docker.internal` is only needed when reaching something running outside any Docker network entirely — the Kubernetes networking section above is a case where that actually applies.
+- **`ETIMEDOUT` reaching a gateway IP from inside a container** — Compose creates its own isolated network per project, with its own gateway address; the default `docker0` bridge gateway (commonly `172.17.0.1`) belongs to a different network and generally isn't reachable from a Compose-managed container. Service names are the reliable way to reach sibling containers.
+
 ## Running Tests
 
 - `./mvnw test` — fast unit/context tests only, no Docker required.
